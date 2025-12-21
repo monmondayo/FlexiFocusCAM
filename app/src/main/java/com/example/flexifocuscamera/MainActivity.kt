@@ -53,7 +53,6 @@ import java.text.SimpleDateFormat
 import java.util.Locale
 import android.os.Environment
 
-
 class MainActivity : ComponentActivity() {
 
     private val requestCameraPermission =

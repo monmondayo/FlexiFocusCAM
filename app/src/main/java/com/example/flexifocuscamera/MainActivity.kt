@@ -37,6 +37,7 @@ import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.unit.Dp
 import kotlin.math.abs
 import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.interaction.collectIsPressedAsState
 import android.content.ContentValues
 import android.os.Build
 import android.provider.MediaStore
@@ -225,15 +226,21 @@ fun CameraPreviewScreen() {
             Text("中央", color = Color.White)
         }
 
-        // ★ 追加：シャッターボタン（右下）
+        // ★ 追加：シャッターボタン（右下） — 押下時に赤く表示
+        val shutterInteraction = remember { androidx.compose.foundation.interaction.MutableInteractionSource() }
+        val shutterPressed by shutterInteraction.collectIsPressedAsState()
+
         Box(
             modifier = Modifier
                 .align(Alignment.BottomEnd)
-                .padding(end = 22.dp, bottom = 28.dp)
+                .padding(end = 44.dp, bottom = 56.dp)
                 .size(78.dp)
                 .clip(CircleShape)
-                .background(Color(0xCCFFFFFF))
-                .clickable {
+                .background(if (shutterPressed) Color.Red else Color(0xCCFFFFFF))
+                .clickable(
+                    interactionSource = shutterInteraction,
+                    indication = null
+                ) {
                     val cap = imageCapture
                     if (cap == null) {
                         Toast.makeText(context, "カメラ準備中です", Toast.LENGTH_SHORT).show()
@@ -284,7 +291,7 @@ fun CameraPreviewScreen() {
                     .align(Alignment.Center)
                     .size(64.dp)
                     .clip(CircleShape)
-                    .background(Color(0xFFFFFFFF))
+                    .background(if (shutterPressed) Color(0xFFFFCDD2) else Color(0xFFFFFFFF))
             )
         }
     }

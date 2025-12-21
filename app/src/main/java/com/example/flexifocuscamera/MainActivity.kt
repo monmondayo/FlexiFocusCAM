@@ -27,6 +27,7 @@ import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.compose.foundation.background
 import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.layout.*
@@ -53,6 +54,11 @@ import androidx.compose.ui.platform.LocalContext
 import java.text.SimpleDateFormat
 import java.util.Locale
 import android.os.Environment
+import androidx.lifecycle.LifecycleOwner
+import androidx.camera.core.ZoomState
+import androidx.compose.runtime.rememberCoroutineScope
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 
 class MainActivity : ComponentActivity() {
 
@@ -106,6 +112,13 @@ fun CameraPreviewScreen() {
     var focusX by remember { mutableStateOf(0f) }
     var focusY by remember { mutableStateOf(0f) }
 
+    // AF枠のサイズ（dp）
+    var focusSize by remember { mutableStateOf(96.dp) }
+
+    // ズーム倍率（1.0 = 等倍）
+    var zoomRatio by remember { mutableStateOf(1.0f) }
+    var cameraZoomState by remember { mutableStateOf<androidx.camera.core.ZoomState?>(null) }
+
     // パッドの操作感（大きいほど移動が速い）
     val moveScale = 1.2f
 
@@ -133,12 +146,21 @@ fun CameraPreviewScreen() {
                             .build()
 
                         cameraProvider.unbindAll()
-                        camera = cameraProvider.bindToLifecycle(
+                        val cam = cameraProvider.bindToLifecycle(
                             lifecycleOwner,
                             CameraSelector.DEFAULT_BACK_CAMERA,
                             preview,
                             capture
                         )
+                        camera = cam
+
+                        // ズーム状態を監視
+                        cam.cameraInfo.zoomState.observe(lifecycleOwner) { zoomState ->
+                            cameraZoomState = zoomState
+                            zoomState?.zoomRatio?.let {
+                                zoomRatio = it
+                            }
+                        }
 
                         imageCapture = capture
 
@@ -155,10 +177,11 @@ fun CameraPreviewScreen() {
             }
         )
 
-        // 枠表示（小さめ）
+        // 枠表示（可変サイズ）
+        val density = LocalDensity.current
         Canvas(modifier = Modifier.fillMaxSize()) {
             if (focusX > 0 && focusY > 0) {
-                val size = 96.dp.toPx()
+                val size = with(density) { focusSize.toPx() }
                 drawRect(
                     color = Color.Yellow,
                     topLeft = Offset(focusX - size / 2, focusY - size / 2),
@@ -168,63 +191,257 @@ fun CameraPreviewScreen() {
             }
         }
 
-        // 親指ドラッグパッド（画面下）
+        // 親指ドラッグパッドとサイズスライダー（画面下）
         val padSize: Dp = 140.dp
-        Box(
+        Row(
             modifier = Modifier
                 .align(Alignment.BottomCenter)
-                .padding(bottom = 120.dp) // シャッターと被らないように少し上へ
-                .size(padSize)
-                .background(Color(0x66000000), RoundedCornerShape(18.dp))
-                .pointerInput(Unit) {
-                    detectDragGestures(
-                        onDrag = { change, dragAmount ->
-                            change.consume()
-
-                            val pv = previewView ?: return@detectDragGestures
-                            val newX = focusX + dragAmount.x * moveScale
-                            val newY = focusY + dragAmount.y * moveScale
-
-                            focusX = newX.coerceIn(0f, pv.width.toFloat())
-                            focusY = newY.coerceIn(0f, pv.height.toFloat())
-                        },
-                        onDragEnd = {
-                            val pv = previewView
-                            val cam = camera
-                            if (pv != null && cam != null && focusX > 0 && focusY > 0) {
-                                lockFocusAt(pv, cam, focusX, focusY)
+                .padding(bottom = 120.dp), // シャッターと被らないように少し上へ
+            horizontalArrangement = Arrangement.spacedBy(20.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            // ズーム倍率ボタンとスライダー（親指パッドの左側）
+            val zoomButtons = listOf(0.5f, 1.0f, 2.0f)
+            val minZoom = cameraZoomState?.minZoomRatio ?: 0.5f
+            val maxZoom = cameraZoomState?.maxZoomRatio ?: 2.0f
+            
+            var isZoomSliderVisible by remember { mutableStateOf(false) }
+            var zoomSliderBaseRatio by remember { mutableStateOf(1.0f) }
+            var isZoomDragging by remember { mutableStateOf(false) }
+            var cumulativeDragOffset by remember { mutableStateOf(0f) }
+            val zoomCoroutineScope = rememberCoroutineScope()
+            
+            // 左側：ズームスライダーとボタン
+            Box {
+                Row(
+                    horizontalArrangement = Arrangement.spacedBy(12.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    // 長押し時に表示されるズームスライダー（フリックモード）- ボタンの左側に縦向き
+                    if (isZoomSliderVisible) {
+                        val sliderHeight = 180.dp
+                        val sliderWidth = 60.dp // 幅を広げる
+                        val density = LocalDensity.current
+                        val sliderHeightPx = with(density) { sliderHeight.toPx() }
+                        val zoomRange = maxZoom - minZoom
+                        
+                        // スライダーが表示されたときに累積オフセットをリセット
+                        LaunchedEffect(zoomSliderBaseRatio) {
+                            cumulativeDragOffset = 0f
+                        }
+                        
+                        Box(
+                            modifier = Modifier
+                                .width(sliderWidth)
+                                .height(sliderHeight)
+                                .background(Color(0xCC000000), RoundedCornerShape(30.dp))
+                                .padding(horizontal = 8.dp, vertical = 12.dp)
+                                .pointerInput(zoomSliderBaseRatio, cumulativeDragOffset) {
+                                    var localDragOffset = cumulativeDragOffset
+                                    
+                                    detectDragGestures(
+                                        onDragStart = {
+                                            isZoomDragging = true
+                                            localDragOffset = 0f
+                                        },
+                                        onDrag = { change, dragAmount ->
+                                            change.consume()
+                                            
+                                            // ローカルオフセットを更新
+                                            localDragOffset += dragAmount.y
+                                            
+                                            // スライダーの高さに対する相対的な移動量を計算
+                                            val normalizedDrag = localDragOffset / sliderHeightPx
+                                            
+                                            // ズーム範囲を計算（スライダーの上端=最大ズーム、下端=最小ズーム）
+                                            // 上方向（負の値）で拡大、下方向（正の値）で縮小
+                                            val delta = -normalizedDrag * zoomRange * 1.5f // 感度を上げる
+                                            
+                                            val newRatio = (zoomSliderBaseRatio + delta).coerceIn(minZoom, maxZoom)
+                                            zoomRatio = newRatio
+                                            camera?.cameraControl?.setZoomRatio(newRatio)
+                                        },
+                                        onDragEnd = {
+                                            isZoomDragging = false
+                                            localDragOffset = 0f
+                                            
+                                            // スライダーを非表示にする（少し遅延して）
+                                            zoomCoroutineScope.launch {
+                                                delay(500)
+                                                isZoomSliderVisible = false
+                                            }
+                                        }
+                                    )
+                                }
+                        ) {
+                            // 現在の倍率を表示
+                            val currentRatioText = "%.2fx".format(zoomRatio)
+                            Text(
+                                text = currentRatioText,
+                                color = Color.White,
+                                fontSize = 16.sp,
+                                modifier = Modifier.align(Alignment.Center)
+                            )
+                            
+                            // 基準倍率のマーカー（中央）
+                            Box(
+                                modifier = Modifier
+                                    .align(Alignment.Center)
+                                    .width(40.dp)
+                                    .height(2.dp)
+                                    .background(Color(0x88FFFFFF), RoundedCornerShape(1.dp))
+                            )
+                        }
+                    }
+                    
+                    // ズーム倍率ボタン（縦並び）
+                    Column(
+                        verticalArrangement = Arrangement.spacedBy(10.dp),
+                        horizontalAlignment = Alignment.CenterHorizontally
+                    ) {
+                        zoomButtons.forEach { buttonRatio ->
+                            val isSelected = abs(zoomRatio - buttonRatio) < 0.1f
+                            Box(
+                                modifier = Modifier
+                                    .size(50.dp) // ボタンサイズを少し大きく
+                                    .clip(CircleShape)
+                                    .background(
+                                        if (isSelected) Color(0xCCFFFFFF) else Color(0x66000000),
+                                        CircleShape
+                                    )
+                                    .pointerInput(buttonRatio) {
+                                        detectTapGestures(
+                                            onTap = {
+                                                // タップで倍率を変更
+                                                zoomRatio = buttonRatio.coerceIn(minZoom, maxZoom)
+                                                camera?.cameraControl?.setZoomRatio(zoomRatio)
+                                            },
+                                            onLongPress = {
+                                                // 長押しでスライダーを表示
+                                                zoomSliderBaseRatio = buttonRatio
+                                                isZoomSliderVisible = true
+                                            }
+                                        )
+                                    }
+                            ) {
+                                Text(
+                                    text = "${buttonRatio}x",
+                                    color = if (isSelected) Color.Black else Color.White,
+                                    fontSize = 14.sp,
+                                    modifier = Modifier.align(Alignment.Center)
+                                )
                             }
                         }
-                    )
-                }
-        ) {
-            Box(
-                modifier = Modifier
-                    .align(Alignment.Center)
-                    .size(10.dp)
-                    .background(Color(0xCCFFFFFF), RoundedCornerShape(50))
-            )
-        }
-
-        // 中央に戻すボタン（便利）
-        Box(
-            modifier = Modifier
-                .align(Alignment.BottomStart)
-                .padding(start = 16.dp, bottom = 36.dp)
-                .background(Color(0x66000000), RoundedCornerShape(14.dp))
-                .padding(horizontal = 14.dp, vertical = 10.dp)
-                .pointerInput(Unit) {
-                    detectTapGestures {
-                        val pv = previewView ?: return@detectTapGestures
-                        val cam = camera ?: return@detectTapGestures
-                        focusX = pv.width / 2f
-                        focusY = pv.height / 2f
-                        lockFocusAt(pv, cam, focusX, focusY)
                     }
                 }
-        ) {
-            Text("中央", color = Color.White)
+            }
+            // 中央：親指ドラッグパッド
+            Box(
+                modifier = Modifier
+                    .size(padSize)
+                    .background(Color(0x66000000), RoundedCornerShape(18.dp))
+                    .pointerInput(Unit) {
+                        detectTapGestures(onDoubleTap = {
+                            val pv = previewView ?: return@detectTapGestures
+                            val cam = camera ?: return@detectTapGestures
+                            focusX = pv.width / 2f
+                            focusY = pv.height / 2f
+                            lockFocusAt(pv, cam, focusX, focusY)
+                        })
+                    }
+                    .pointerInput(Unit) {
+                        detectDragGestures(
+                            onDrag = { change, dragAmount ->
+                                change.consume()
+
+                                val pv = previewView ?: return@detectDragGestures
+                                val newX = focusX + dragAmount.x * moveScale
+                                val newY = focusY + dragAmount.y * moveScale
+
+                                focusX = newX.coerceIn(0f, pv.width.toFloat())
+                                focusY = newY.coerceIn(0f, pv.height.toFloat())
+                            },
+                            onDragEnd = {
+                                val pv = previewView
+                                val cam = camera
+                                if (pv != null && cam != null && focusX > 0 && focusY > 0) {
+                                    lockFocusAt(pv, cam, focusX, focusY)
+                                }
+                            }
+                        )
+                    }
+            ) {
+                Box(
+                    modifier = Modifier
+                        .align(Alignment.Center)
+                        .size(10.dp)
+                        .background(Color(0xCCFFFFFF), RoundedCornerShape(50))
+                )
+            }
+
+            // AF枠サイズスライダー（縦方向）
+            val sliderHeight = padSize
+            val minSize = 48.dp
+            val maxSize = 200.dp
+            val density = LocalDensity.current
+            
+            // focusSize からスライダーの位置を計算
+            val normalized = (focusSize.value - minSize.value) / (maxSize.value - minSize.value)
+            val maxOffsetPx = with(density) { (sliderHeight - 20.dp).toPx() }
+            val sliderOffset = maxOffsetPx * (1f - normalized) - maxOffsetPx / 2f
+            
+            var isDragging by remember { mutableStateOf(false) }
+            var dragOffset by remember { mutableStateOf(0f) }
+            
+            Box(
+                modifier = Modifier
+                    .width(24.dp)
+                    .height(sliderHeight)
+                    .background(Color(0x66000000), RoundedCornerShape(12.dp))
+                    .pointerInput(Unit) {
+                        detectDragGestures(
+                            onDragStart = {
+                                isDragging = true
+                                dragOffset = 0f
+                            },
+                            onDrag = { change, dragAmount ->
+                                change.consume()
+                                dragOffset += dragAmount.y
+                                
+                                // スライダーの範囲内に制限
+                                val totalOffset = sliderOffset + dragOffset
+                                val clampedOffset = totalOffset.coerceIn(-maxOffsetPx, maxOffsetPx)
+                                
+                                // オフセットからサイズを計算（上=小、下=大）
+                                val newNormalized = (clampedOffset + maxOffsetPx) / (maxOffsetPx * 2f)
+                                focusSize = minSize + (maxSize - minSize) * (1f - newNormalized)
+                            },
+                            onDragEnd = {
+                                isDragging = false
+                                dragOffset = 0f
+                            }
+                        )
+                    }
+            ) {
+                // スライダーのつまみ
+                val currentOffset = if (isDragging) sliderOffset + dragOffset else sliderOffset
+                val thumbPosition = with(density) { 
+                    (sliderHeight.toPx() / 2f + currentOffset).coerceIn(
+                        10.dp.toPx(),
+                        sliderHeight.toPx() - 10.dp.toPx()
+                    )
+                }
+                Box(
+                    modifier = Modifier
+                        .align(Alignment.TopCenter)
+                        .offset(y = with(density) { (thumbPosition - 10.dp.toPx()).toDp() })
+                        .width(20.dp)
+                        .height(20.dp)
+                        .background(Color(0xCCFFFFFF), RoundedCornerShape(10.dp))
+                )
+            }
         }
+
 
         // ★ 追加：シャッターボタン（右下） — 押下時に赤く表示
         val shutterInteraction = remember { androidx.compose.foundation.interaction.MutableInteractionSource() }

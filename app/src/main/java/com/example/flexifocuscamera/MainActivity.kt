@@ -20,7 +20,8 @@ import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.ContextCompat
 import androidx.camera.core.FocusMeteringAction
-import java.util.concurrent.TimeUnit
+import androidx.camera.core.FocusMeteringResult
+import com.google.common.util.concurrent.ListenableFuture
 import androidx.compose.foundation.Canvas
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
@@ -45,16 +46,16 @@ import android.provider.MediaStore
 import android.widget.Toast
 import androidx.camera.core.ImageCapture
 import androidx.camera.core.ImageCaptureException
+import androidx.camera.core.AspectRatio
+import android.view.Surface
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material3.Text
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.platform.LocalContext
 import java.text.SimpleDateFormat
 import java.util.Locale
 import android.os.Environment
-import androidx.lifecycle.LifecycleOwner
 import androidx.camera.core.ZoomState
 import androidx.compose.runtime.rememberCoroutineScope
 import kotlinx.coroutines.delay
@@ -85,7 +86,8 @@ private fun lockFocusAt(
     previewView: PreviewView,
     camera: Camera,
     xPx: Float,
-    yPx: Float
+    yPx: Float,
+    onFocusResult: ((Boolean) -> Unit)? = null
 ) {
     val point = previewView.meteringPointFactory.createPoint(xPx, yPx)
     val action = FocusMeteringAction.Builder(
@@ -95,7 +97,18 @@ private fun lockFocusAt(
         .disableAutoCancel() // ← 固定
         .build()
 
-    camera.cameraControl.startFocusAndMetering(action)
+    val future: ListenableFuture<FocusMeteringResult> = camera.cameraControl.startFocusAndMetering(action)
+    
+    // フォーカス結果を監視
+    future.addListener({
+        try {
+            val result = future.get()
+            val isFocused = result.isFocusSuccessful
+            onFocusResult?.invoke(isFocused)
+        } catch (e: Exception) {
+            onFocusResult?.invoke(false)
+        }
+    }, ContextCompat.getMainExecutor(previewView.context))
 }
 @Composable
 fun CameraPreviewScreen() {
@@ -115,9 +128,12 @@ fun CameraPreviewScreen() {
     // AF枠のサイズ（dp）
     var focusSize by remember { mutableStateOf(96.dp) }
 
+    // フォーカス状態（ピントが合っているか）
+    var isFocused by remember { mutableStateOf(false) }
+
     // ズーム倍率（1.0 = 等倍）
     var zoomRatio by remember { mutableStateOf(1.0f) }
-    var cameraZoomState by remember { mutableStateOf<androidx.camera.core.ZoomState?>(null) }
+    var cameraZoomState by remember { mutableStateOf<ZoomState?>(null) }
 
     // パッドの操作感（大きいほど移動が速い）
     val moveScale = 1.2f
@@ -125,65 +141,83 @@ fun CameraPreviewScreen() {
     Box(Modifier.fillMaxSize()) {
 
         // Preview
-        AndroidView(
-            modifier = Modifier.fillMaxSize(),
-            factory = { ctx ->
-                PreviewView(ctx).also { pv ->
-                    previewView = pv
-                    pv.implementationMode = PreviewView.ImplementationMode.PERFORMANCE
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .background(Color.Black) // 余白を黒で塗りつぶし
+        ) {
+            AndroidView(
+                modifier = Modifier.fillMaxSize(),
+                factory = { ctx ->
+                    PreviewView(ctx).also { pv ->
+                        previewView = pv
+                        pv.implementationMode = PreviewView.ImplementationMode.PERFORMANCE
+                        pv.scaleType = PreviewView.ScaleType.FIT_CENTER // 画像全体を表示（余白は黒帯）
 
-                    val cameraProviderFuture = ProcessCameraProvider.getInstance(ctx)
-                    cameraProviderFuture.addListener({
-                        val cameraProvider = cameraProviderFuture.get()
+                        val cameraProviderFuture = ProcessCameraProvider.getInstance(ctx)
+                        cameraProviderFuture.addListener({
+                            val cameraProvider = cameraProviderFuture.get()
 
-                        val preview = Preview.Builder().build().also {
-                            it.setSurfaceProvider(pv.surfaceProvider)
-                        }
+                            // PreviewViewのサイズを取得してアスペクト比を計算
+                            pv.post {
+                                val previewWidth = pv.width
+                                val previewHeight = pv.height
+                                
+                                if (previewWidth > 0 && previewHeight > 0) {
+                                    
+                                    // プレビューとImageCaptureのアスペクト比を一致させる
+                                    val preview = Preview.Builder()
+                                        .build().also {
+                                            it.surfaceProvider = pv.surfaceProvider
+                                        }
 
-                        // ★ 追加：ImageCapture
-                        val capture = ImageCapture.Builder()
-                            .setCaptureMode(ImageCapture.CAPTURE_MODE_MINIMIZE_LATENCY)
-                            .build()
+                                    // ImageCaptureも同じアスペクト比に設定
+                                    val capture = ImageCapture.Builder()
+                                        .setCaptureMode(ImageCapture.CAPTURE_MODE_MINIMIZE_LATENCY)
+                                        .build()
 
-                        cameraProvider.unbindAll()
-                        val cam = cameraProvider.bindToLifecycle(
-                            lifecycleOwner,
-                            CameraSelector.DEFAULT_BACK_CAMERA,
-                            preview,
-                            capture
-                        )
-                        camera = cam
+                                    cameraProvider.unbindAll()
+                                    
+                                    // デフォルトのバックカメラを使用
+                                    val cam = cameraProvider.bindToLifecycle(
+                                        lifecycleOwner,
+                                        CameraSelector.DEFAULT_BACK_CAMERA,
+                                        preview,
+                                        capture
+                                    )
+                                    camera = cam
 
-                        // ズーム状態を監視
-                        cam.cameraInfo.zoomState.observe(lifecycleOwner) { zoomState ->
-                            cameraZoomState = zoomState
-                            zoomState?.zoomRatio?.let {
-                                zoomRatio = it
+                                    // ズーム状態を監視
+                                    cam.cameraInfo.zoomState.observe(lifecycleOwner) { state ->
+                                        cameraZoomState = state
+                                        zoomRatio = state.zoomRatio
+                                    }
+
+                                    imageCapture = capture
+
+                                    // 中央に枠を置いて、その位置でAF/AE固定
+                                    focusX = pv.width / 2f
+                                    focusY = pv.height / 2f
+                                    lockFocusAt(pv, cam, focusX, focusY) { focused ->
+                                        isFocused = focused
+                                    }
+                                }
                             }
-                        }
 
-                        imageCapture = capture
-
-                        // 中央に枠を置いて、その位置でAF/AE固定
-                        pv.post {
-                            focusX = pv.width / 2f
-                            focusY = pv.height / 2f
-                            val cam = camera
-                            if (cam != null) lockFocusAt(pv, cam, focusX, focusY)
-                        }
-
-                    }, ContextCompat.getMainExecutor(ctx))
+                        }, ContextCompat.getMainExecutor(ctx))
+                    }
                 }
-            }
-        )
+            )
+        }
 
-        // 枠表示（可変サイズ）
+        // 枠表示（可変サイズ、フォーカス状態に応じて色を変更）
         val density = LocalDensity.current
         Canvas(modifier = Modifier.fillMaxSize()) {
             if (focusX > 0 && focusY > 0) {
                 val size = with(density) { focusSize.toPx() }
+                val frameColor = if (isFocused) Color(0xFF4CAF50) else Color.Yellow // 緑色（ピント合い）または黄色
                 drawRect(
-                    color = Color.Yellow,
+                    color = frameColor,
                     topLeft = Offset(focusX - size / 2, focusY - size / 2),
                     size = Size(size, size),
                     style = Stroke(width = 3.dp.toPx())
@@ -200,10 +234,8 @@ fun CameraPreviewScreen() {
             horizontalArrangement = Arrangement.spacedBy(20.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
-            // ズーム倍率ボタンとスライダー（親指パッドの左側）
-            val zoomButtons = listOf(0.5f, 1.0f, 2.0f)
-            val minZoom = cameraZoomState?.minZoomRatio ?: 0.5f
-            val maxZoom = cameraZoomState?.maxZoomRatio ?: 2.0f
+            val actualMinZoom = cameraZoomState?.minZoomRatio ?: 0.5f
+            val actualMaxZoom = cameraZoomState?.maxZoomRatio ?: 4.0f
             
             var isZoomSliderVisible by remember { mutableStateOf(false) }
             var zoomSliderBaseRatio by remember { mutableStateOf(1.0f) }
@@ -217,15 +249,13 @@ fun CameraPreviewScreen() {
                     horizontalArrangement = Arrangement.spacedBy(12.dp),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    // 長押し時に表示されるズームスライダー（フリックモード）- ボタンの左側に縦向き
+                    // 長押し時に表示されるズームスライダー
                     if (isZoomSliderVisible) {
                         val sliderHeight = 180.dp
-                        val sliderWidth = 60.dp // 幅を広げる
+                        val sliderWidth = 60.dp
                         val density = LocalDensity.current
                         val sliderHeightPx = with(density) { sliderHeight.toPx() }
-                        val zoomRange = maxZoom - minZoom
                         
-                        // スライダーが表示されたときに累積オフセットをリセット
                         LaunchedEffect(zoomSliderBaseRatio) {
                             cumulativeDragOffset = 0f
                         }
@@ -236,7 +266,7 @@ fun CameraPreviewScreen() {
                                 .height(sliderHeight)
                                 .background(Color(0xCC000000), RoundedCornerShape(30.dp))
                                 .padding(horizontal = 8.dp, vertical = 12.dp)
-                                .pointerInput(zoomSliderBaseRatio, cumulativeDragOffset) {
+                                .pointerInput(zoomSliderBaseRatio, cumulativeDragOffset, actualMinZoom, actualMaxZoom) {
                                     var localDragOffset = cumulativeDragOffset
                                     
                                     detectDragGestures(
@@ -246,26 +276,18 @@ fun CameraPreviewScreen() {
                                         },
                                         onDrag = { change, dragAmount ->
                                             change.consume()
-                                            
-                                            // ローカルオフセットを更新
                                             localDragOffset += dragAmount.y
-                                            
-                                            // スライダーの高さに対する相対的な移動量を計算
                                             val normalizedDrag = localDragOffset / sliderHeightPx
                                             
-                                            // ズーム範囲を計算（スライダーの上端=最大ズーム、下端=最小ズーム）
-                                            // 上方向（負の値）で拡大、下方向（正の値）で縮小
-                                            val delta = -normalizedDrag * zoomRange * 1.5f // 感度を上げる
+                                            val zoomRange = actualMaxZoom - actualMinZoom
+                                            val delta = -normalizedDrag * zoomRange * 1.5f
                                             
-                                            val newRatio = (zoomSliderBaseRatio + delta).coerceIn(minZoom, maxZoom)
-                                            zoomRatio = newRatio
+                                            val newRatio = (zoomSliderBaseRatio + delta).coerceIn(actualMinZoom, actualMaxZoom)
                                             camera?.cameraControl?.setZoomRatio(newRatio)
                                         },
                                         onDragEnd = {
                                             isZoomDragging = false
                                             localDragOffset = 0f
-                                            
-                                            // スライダーを非表示にする（少し遅延して）
                                             zoomCoroutineScope.launch {
                                                 delay(500)
                                                 isZoomSliderVisible = false
@@ -274,7 +296,6 @@ fun CameraPreviewScreen() {
                                     )
                                 }
                         ) {
-                            // 現在の倍率を表示
                             val currentRatioText = "%.2fx".format(zoomRatio)
                             Text(
                                 text = currentRatioText,
@@ -283,7 +304,6 @@ fun CameraPreviewScreen() {
                                 modifier = Modifier.align(Alignment.Center)
                             )
                             
-                            // 基準倍率のマーカー（中央）
                             Box(
                                 modifier = Modifier
                                     .align(Alignment.Center)
@@ -295,31 +315,54 @@ fun CameraPreviewScreen() {
                     }
                     
                     // ズーム倍率ボタン（縦並び）
+                    val zoomButtons = listOf(0.5f, 1.0f, 2.0f)
                     Column(
                         verticalArrangement = Arrangement.spacedBy(10.dp),
                         horizontalAlignment = Alignment.CenterHorizontally
                     ) {
                         zoomButtons.forEach { buttonRatio ->
-                            val isSelected = abs(zoomRatio - buttonRatio) < 0.1f
+                            val targetZoomRatio = when (buttonRatio) {
+                                0.5f -> actualMinZoom
+                                1.0f -> 1.0f
+                                else -> buttonRatio.coerceIn(actualMinZoom, actualMaxZoom)
+                            }
+
+                            val isSelected = abs(zoomRatio - targetZoomRatio) < 0.1f
+
                             Box(
                                 modifier = Modifier
-                                    .size(50.dp) // ボタンサイズを少し大きく
+                                    .size(50.dp)
                                     .clip(CircleShape)
                                     .background(
                                         if (isSelected) Color(0xCCFFFFFF) else Color(0x66000000),
                                         CircleShape
                                     )
-                                    .pointerInput(buttonRatio) {
+                                    .pointerInput(camera, buttonRatio, actualMinZoom, actualMaxZoom) {
                                         detectTapGestures(
                                             onTap = {
-                                                // タップで倍率を変更
-                                                zoomRatio = buttonRatio.coerceIn(minZoom, maxZoom)
-                                                camera?.cameraControl?.setZoomRatio(zoomRatio)
+                                                camera?.let { cam ->
+                                                    val minZoom = cam.cameraInfo.zoomState.value?.minZoomRatio ?: actualMinZoom
+                                                    val maxZoom = cam.cameraInfo.zoomState.value?.maxZoomRatio ?: actualMaxZoom
+                                                    val newTargetZoom = when (buttonRatio) {
+                                                        0.5f -> minZoom
+                                                        1.0f -> 1.0f
+                                                        else -> buttonRatio.coerceIn(minZoom, maxZoom)
+                                                    }
+                                                    cam.cameraControl.setZoomRatio(newTargetZoom)
+                                                }
                                             },
                                             onLongPress = {
-                                                // 長押しでスライダーを表示
-                                                zoomSliderBaseRatio = buttonRatio
-                                                isZoomSliderVisible = true
+                                                camera?.let { cam ->
+                                                    val minZoom = cam.cameraInfo.zoomState.value?.minZoomRatio ?: actualMinZoom
+                                                    val maxZoom = cam.cameraInfo.zoomState.value?.maxZoomRatio ?: actualMaxZoom
+                                                    val baseSliderRatio = when (buttonRatio) {
+                                                        0.5f -> minZoom
+                                                        1.0f -> 1.0f
+                                                        else -> buttonRatio.coerceIn(minZoom, maxZoom)
+                                                    }
+                                                    zoomSliderBaseRatio = baseSliderRatio
+                                                    isZoomSliderVisible = true
+                                                }
                                             }
                                         )
                                     }
@@ -341,13 +384,29 @@ fun CameraPreviewScreen() {
                     .size(padSize)
                     .background(Color(0x66000000), RoundedCornerShape(18.dp))
                     .pointerInput(Unit) {
-                        detectTapGestures(onDoubleTap = {
-                            val pv = previewView ?: return@detectTapGestures
-                            val cam = camera ?: return@detectTapGestures
-                            focusX = pv.width / 2f
-                            focusY = pv.height / 2f
-                            lockFocusAt(pv, cam, focusX, focusY)
-                        })
+                        detectTapGestures(
+                            onDoubleTap = {
+                                val pv = previewView ?: return@detectTapGestures
+                                val cam = camera ?: return@detectTapGestures
+                                focusX = pv.width / 2f
+                                focusY = pv.height / 2f
+                                isFocused = false // フォーカス状態をリセット
+                                lockFocusAt(pv, cam, focusX, focusY) { focused ->
+                                    isFocused = focused
+                                }
+                            },
+                            onLongPress = {
+                                // 長押しでオートフォーカスを作動
+                                val pv = previewView ?: return@detectTapGestures
+                                val cam = camera ?: return@detectTapGestures
+                                if (focusX > 0 && focusY > 0) {
+                                    isFocused = false // フォーカス状態をリセット
+                                    lockFocusAt(pv, cam, focusX, focusY) { focused ->
+                                        isFocused = focused
+                                    }
+                                }
+                            }
+                        )
                     }
                     .pointerInput(Unit) {
                         detectDragGestures(
@@ -360,12 +419,16 @@ fun CameraPreviewScreen() {
 
                                 focusX = newX.coerceIn(0f, pv.width.toFloat())
                                 focusY = newY.coerceIn(0f, pv.height.toFloat())
+                                isFocused = false // ドラッグ中はフォーカス状態をリセット
                             },
                             onDragEnd = {
                                 val pv = previewView
                                 val cam = camera
                                 if (pv != null && cam != null && focusX > 0 && focusY > 0) {
-                                    lockFocusAt(pv, cam, focusX, focusY)
+                                    isFocused = false // フォーカス状態をリセット
+                                    lockFocusAt(pv, cam, focusX, focusY) { focused ->
+                                        isFocused = focused
+                                    }
                                 }
                             }
                         )
@@ -381,11 +444,10 @@ fun CameraPreviewScreen() {
 
             // AF枠サイズスライダー（縦方向）
             val sliderHeight = padSize
-            val minSize = 48.dp
+            val minSize = 24.dp
             val maxSize = 200.dp
             val density = LocalDensity.current
             
-            // focusSize からスライダーの位置を計算
             val normalized = (focusSize.value - minSize.value) / (maxSize.value - minSize.value)
             val maxOffsetPx = with(density) { (sliderHeight - 20.dp).toPx() }
             val sliderOffset = maxOffsetPx * (1f - normalized) - maxOffsetPx / 2f
@@ -408,11 +470,9 @@ fun CameraPreviewScreen() {
                                 change.consume()
                                 dragOffset += dragAmount.y
                                 
-                                // スライダーの範囲内に制限
                                 val totalOffset = sliderOffset + dragOffset
                                 val clampedOffset = totalOffset.coerceIn(-maxOffsetPx, maxOffsetPx)
                                 
-                                // オフセットからサイズを計算（上=小、下=大）
                                 val newNormalized = (clampedOffset + maxOffsetPx) / (maxOffsetPx * 2f)
                                 focusSize = minSize + (maxSize - minSize) * (1f - newNormalized)
                             },
@@ -462,6 +522,11 @@ fun CameraPreviewScreen() {
                     if (cap == null) {
                         Toast.makeText(context, "カメラ準備中です", Toast.LENGTH_SHORT).show()
                         return@clickable
+                    }
+                    
+                    // ★ 追加: 撮影時の回転情報を取得して設定
+                    previewView?.display?.let { display ->
+                        cap.targetRotation = display.rotation
                     }
 
                     // ファイル名（日時）

@@ -27,7 +27,7 @@ FlexiFocusCAMは、画面上のAF（オートフォーカス）枠を親指で�
 - Android 8.0（API 26）以上
 - 背面カメラ搭載端末
 - Android Studio（JDK 17以上）
-- Android SDK 36
+- Android SDK 37（targetSdk 36）
 
 > [!NOTE]
 > 現在の保存処理はScoped Storageを前提としているため、Android 8～9（API 26～28）では写真の保存に失敗する場合があります。Android 10（API 29）以上を推奨します。
@@ -40,7 +40,7 @@ cd FlexiFocusCAM
 ./gradlew assembleDebug
 ```
 
-または、Android Studioでプロジェクトを開き、SDK 36をインストールして実機へ実行してください。
+または、Android Studioでプロジェクトを開き、SDK 37をインストールして実機へ実行してください。
 
 ## 使用技術
 
@@ -48,7 +48,7 @@ cd FlexiFocusCAM
 - Jetpack Compose
 - CameraX（Camera2 / Lifecycle / View）
 - Material 3
-- Gradle 8.13 / Android Gradle Plugin 8.13.2
+- Gradle 9.5 / Android Gradle Plugin 9.3.1
 
 ## 権限とプライバシー
 

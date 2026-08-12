@@ -8,7 +8,7 @@ espressoCore = "3.7.0"
 lifecycleRuntimeKtx = "2.10.0"
 lifecycle = "2.9.0"
 activityCompose = "1.12.2"
-composeBom = "2024.09.00"
+composeBom = "2026.06.01"
 camerax = "1.5.2"
 
 [libraries]

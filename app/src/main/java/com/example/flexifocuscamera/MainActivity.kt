@@ -60,6 +60,13 @@ import androidx.camera.core.ZoomState
 import androidx.compose.runtime.rememberCoroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import android.content.Context
+import android.hardware.SensorManager
+import android.view.OrientationEventListener
+import android.view.WindowManager
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.tween
+import androidx.compose.ui.draw.rotate
 
 class MainActivity : ComponentActivity() {
 
@@ -110,6 +117,64 @@ private fun lockFocusAt(
         }
     }, ContextCompat.getMainExecutor(previewView.context))
 }
+/** 画面（ディスプレイ）自体が何度回転しているかを度数で返す。 */
+@Suppress("DEPRECATION")
+private fun currentDisplayRotationDegrees(context: Context): Int {
+    val rotation = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+        context.display?.rotation ?: Surface.ROTATION_0
+    } else {
+        (context.getSystemService(Context.WINDOW_SERVICE) as WindowManager).defaultDisplay.rotation
+    }
+    return when (rotation) {
+        Surface.ROTATION_90 -> 90
+        Surface.ROTATION_180 -> 180
+        Surface.ROTATION_270 -> 270
+        else -> 0
+    }
+}
+
+/**
+ * 端末の傾きに合わせてUI要素を正立させるための回転角（度）を返す。
+ * 画面自体が回転した分は差し引くので、自動回転がONでも二重に回らない。
+ */
+@Composable
+fun rememberUprightRotation(): Float {
+    val context = LocalContext.current
+
+    // 90度単位にスナップした目標角（-270..0）
+    var targetRotation by remember { mutableStateOf(0f) }
+    // 270度→0度で逆回りしないよう、最短経路で足し込んだ累積角
+    var accumulatedRotation by remember { mutableStateOf(0f) }
+    var previousTarget by remember { mutableStateOf(0f) }
+
+    DisposableEffect(context) {
+        val listener = object : OrientationEventListener(context, SensorManager.SENSOR_DELAY_NORMAL) {
+            override fun onOrientationChanged(orientation: Int) {
+                if (orientation == ORIENTATION_UNKNOWN) return
+                // 端末の傾きを90度単位に丸める（時計回りが正）
+                val deviceDegrees = ((orientation + 45) / 90 * 90) % 360
+                // ディスプレイの回転を同じ「時計回り」の向きに揃える
+                val displayDegrees = (360 - currentDisplayRotationDegrees(context)) % 360
+                targetRotation = -(((deviceDegrees - displayDegrees) + 360) % 360).toFloat()
+            }
+        }
+        if (listener.canDetectOrientation()) listener.enable()
+        onDispose { listener.disable() }
+    }
+
+    LaunchedEffect(targetRotation) {
+        val delta = ((targetRotation - previousTarget + 540f) % 360f) - 180f
+        accumulatedRotation += delta
+        previousTarget = targetRotation
+    }
+
+    return animateFloatAsState(
+        targetValue = accumulatedRotation,
+        animationSpec = tween(durationMillis = 300),
+        label = "uprightRotation"
+    ).value
+}
+
 @Composable
 fun CameraPreviewScreen() {
     val lifecycleOwner = LocalLifecycleOwner.current
@@ -134,6 +199,9 @@ fun CameraPreviewScreen() {
     // ズーム倍率（1.0 = 等倍）
     var zoomRatio by remember { mutableStateOf(1.0f) }
     var cameraZoomState by remember { mutableStateOf<ZoomState?>(null) }
+
+    // 端末の傾きに追従してズーム文字を正立させる回転角
+    val uprightRotation = rememberUprightRotation()
 
     // パッドの操作感（大きいほど移動が速い）
     val moveScale = 1.2f
@@ -301,7 +369,9 @@ fun CameraPreviewScreen() {
                                 text = currentRatioText,
                                 color = Color.White,
                                 fontSize = 16.sp,
-                                modifier = Modifier.align(Alignment.Center)
+                                modifier = Modifier
+                                    .align(Alignment.Center)
+                                    .rotate(uprightRotation)
                             )
                             
                             Box(
@@ -371,7 +441,9 @@ fun CameraPreviewScreen() {
                                     text = "${buttonRatio}x",
                                     color = if (isSelected) Color.Black else Color.White,
                                     fontSize = 14.sp,
-                                    modifier = Modifier.align(Alignment.Center)
+                                    modifier = Modifier
+                                        .align(Alignment.Center)
+                                        .rotate(uprightRotation)
                                 )
                             }
                         }
